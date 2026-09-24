@@ -81,6 +81,40 @@ pytest tests/
 所有摄入 / 作废操作共用同一把进程级串行锁（`ingest_lock`）并各自在单事务内
 完成，保证并发下状态一致。
 
+## 缺口查询（Gaps）
+
+`GET /api/v1/devices/{device_id}/gaps` 返回设备当前缓冲区序号与缺失序号。
+缺口范围固定为**从 `next_expected` 到缓冲区最大序号**；服务端按**连续缺口
+区间**计算——即使缺口极其稀疏（例如先提交 seq=1、再缓冲 seq=100000000，
+缺口近一亿个）也不会逐个构造缺失序号，请求不会阻塞或耗尽内存。
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `limit` | 否 | 每页缺口序号个数，默认 `1000`，最大 `10000`（仅作用于 `gaps`） |
+| `offset` | 否 | 在全部缺口中的起始偏移，默认 `0`；深翻页按区间长度整体跳过，不逐个遍历被跳过的缺口 |
+
+响应字段：
+
+- `buffered_seqs`：缓冲区中的全部序号（升序，不分页）；
+- `gap_count`：缺口总数（与分页无关，始终为准确的全量计数）；
+- `gaps`：本页缺口序号（升序；小范围查询与原有缺口顺序一致）；
+- `limit` / `offset`：回显本次分页参数。
+
+未知设备返回 `404`。
+
+```bash
+# 已提交 1，缓冲 100000000：缺口 2..99999999 共 99999998 个
+curl 'localhost:8000/api/v1/devices/ph-meter-01/gaps?limit=3&offset=0'
+# => {"device_id":"ph-meter-01","committed_upto":1,"next_expected":2,
+#     "buffered_seqs":[100000000],"gap_count":99999998,"limit":3,"offset":0,
+#     "gaps":[2,3,4]}
+
+# 深翻页同样即时返回（按区间整体跳过，不逐个遍历）
+curl 'localhost:8000/api/v1/devices/ph-meter-01/gaps?limit=3&offset=99999995'
+# => {..., "gap_count":99999998, "limit":3, "offset":99999995,
+#     "gaps":[99999997,99999998,99999999]}
+```
+
 ## API 一览
 
 | 方法 | 路径 | 说明 |
@@ -88,7 +122,7 @@ pytest tests/
 | GET | `/health` | 健康检查 |
 | POST | `/api/v1/packages` | 上报测量包（幂等、乱序缓冲、按序提交） |
 | GET | `/api/v1/devices` | 设备列表及状态汇总 |
-| GET | `/api/v1/devices/{id}/gaps` | 缺口：缓冲区序号与缺失序号 |
+| GET | `/api/v1/devices/{id}/gaps` | 缺口：缓冲区序号与缺失序号（`limit`/`offset` 分页，按连续区间计算，稀疏大缺口不阻塞） |
 | GET | `/api/v1/devices/{id}/committed` | 已提交序号（支持 `from_seq`/`to_seq`/`limit`/`offset`；作废序号不在其中） |
 | GET | `/api/v1/devices/{id}/duplicates` | 重复包记录（可按 `reason` 过滤，含 `already_voided`） |
 | POST | `/api/v1/devices/{id}/voids` | 登记缺包作废段（幂等；推进前沿并立即排水提交后续缓冲包） |
@@ -500,7 +534,8 @@ curl -X POST localhost:8000/api/v1/packages -H 'Content-Type: application/json' 
 
 ```bash
 curl localhost:8000/api/v1/devices/ph-meter-01/gaps
-# => {"committed_upto":0,"next_expected":1,"buffered_seqs":[2],"gaps":[1]}
+# => {"committed_upto":0,"next_expected":1,"buffered_seqs":[2],
+#     "gap_count":1,"limit":1000,"offset":0,"gaps":[1]}
 ```
 
 补齐缺口后按序提交：
@@ -884,6 +919,7 @@ curl 'localhost:8000/api/v1/devices/ph-meter-01/metrics/clock-drift?metric=tempe
 app/
   main.py         # FastAPI 路由
   logic.py        # 摄入核心：幂等判定、缓冲、排水提交（摄入与作废共用的排水路径，提交时驱动告警评估）
+  gaps.py         # 缺口查询：连续缺口区间折叠、limit/offset 分页（稀疏大缺口按区间推进，不逐个构造）
   voids.py        # 缺包作废：缺口段校验、登记推进、共用排水、幂等与登记查询
   alerts.py       # 阈值告警：规则 CRUD、带连续计数的迟滞状态机、按提交顺序评估
   calibrations.py # 设备指标校准：有效区间不重叠校验、按时刻解析与线性校准计算（含区间索引供聚合批量解析）
@@ -899,6 +935,7 @@ app/
 tests/
   conftest.py           # 测试数据库隔离（临时文件）
   test_api.py           # 摄入 / 查询接口测试
+  test_gaps.py          # 缺口查询分页测试（稀疏大缺口 / 深翻页 / 参数校验 / 404）
   test_voids.py         # 缺包作废：约束 / 排水 / 共用排水告警 / 幂等 / 冲突 / 导出完整性测试
   test_rollup.py        # 窗口聚合测试
   test_alerts.py        # 阈值告警测试

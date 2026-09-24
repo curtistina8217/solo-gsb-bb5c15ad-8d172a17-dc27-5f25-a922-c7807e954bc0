@@ -52,8 +52,17 @@ class GapsResponse(BaseModel):
     device_id: str
     committed_upto: int
     next_expected: int
-    buffered_seqs: List[int]
-    gaps: List[int] = Field(description="缓冲区最大序号之前缺失的序号")
+    buffered_seqs: List[int] = Field(
+        description="缓冲区中的全部序号（升序，不分页）"
+    )
+    gap_count: int = Field(
+        description="缺口总数：从 next_expected 到缓冲区最大序号之间缺失的序号个数"
+    )
+    limit: int = Field(description="本页大小上限（仅作用于 gaps）")
+    offset: int = Field(description="本页在全部缺口中的起始偏移（仅作用于 gaps）")
+    gaps: List[int] = Field(
+        description="本页缺口序号（升序）：从 next_expected 到缓冲区最大序号之间缺失的序号"
+    )
 
 
 class CommittedResponse(BaseModel):

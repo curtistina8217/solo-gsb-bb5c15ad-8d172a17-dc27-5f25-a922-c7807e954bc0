@@ -27,6 +27,7 @@ from . import exports
 from .comparisons import ComparisonError, compare_devices
 from .exports import ExportError, InvalidCursor
 from .exposure import ExposureError, compute_exposure
+from .gaps import paginate_gaps
 from .logic import IdempotencyConflict, ingest_package
 from .ratio_acceptance import (
     RatioAcceptanceConflict,
@@ -152,7 +153,16 @@ def list_devices():
 
 
 @app.get("/api/v1/devices/{device_id}/gaps", response_model=GapsResponse)
-def get_gaps(device_id: str):
+def get_gaps(
+    device_id: str,
+    limit: int = Query(default=1000, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+):
+    """缺口查询：从 next_expected 到缓冲区最大序号之间的缺失序号，分页返回。
+
+    缺口按连续区间计算（不逐个构造缺失序号），稀疏大缺口与深翻页都不会
+    阻塞；limit/offset 只作用于 gaps 列表，buffered_seqs 始终完整返回。
+    """
     with db.get_conn() as conn:
         dev = conn.execute(
             "SELECT committed_upto FROM devices WHERE device_id = ?", (device_id,)
@@ -166,15 +176,15 @@ def get_gaps(device_id: str):
                 "SELECT seq FROM buffer WHERE device_id = ? ORDER BY seq", (device_id,)
             ).fetchall()
         ]
-    gaps: List[int] = []
-    if buffered:
-        have = set(buffered)
-        gaps = [s for s in range(committed_upto + 1, max(buffered) + 1) if s not in have]
+    gap_count, gaps = paginate_gaps(committed_upto, buffered, limit, offset)
     return GapsResponse(
         device_id=device_id,
         committed_upto=committed_upto,
         next_expected=committed_upto + 1,
         buffered_seqs=buffered,
+        gap_count=gap_count,
+        limit=limit,
+        offset=offset,
         gaps=gaps,
     )
 
